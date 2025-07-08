@@ -18,7 +18,7 @@ import {
   getDownloadURL 
 } from "firebase/storage";
 import { auth, db, storage } from "@/lib/firebase";
-import { Activity, Award, Book, Calendar, ExternalLink, Download } from "lucide-react";
+import { Activity, Award, Book, Calendar, ExternalLink, Download, User } from "lucide-react";
 import { CertificateUploadComponent } from "@/app/components/CertificateUploadComponent";
 import { CertificateForm } from "@/app/components/CertificateForm";
 
@@ -27,6 +27,14 @@ interface UserData {
   class_name: string;
   role: string;
   student_name: string;
+  teacher_id?: string; // Add teacher_id field
+}
+
+interface TeacherData {
+  name: string;
+  email: string;
+  department?: string;
+  phone?: string;
 }
 
 interface ActivityData {
@@ -73,6 +81,9 @@ const StudentDashboard = () => {
 
   const [userData, setUserData] = useState<UserData | null>(null);
   const [activities, setActivities] = useState<ActivityData[]>([]);
+  const [teacherData, setTeacherData] = useState<TeacherData | null>(null);
+  const [teacherLoading, setTeacherLoading] = useState(false);
+  const [teacherError, setTeacherError] = useState<string | null>(null);
   
   // Certificate upload state
   const [showCertificateForm, setShowCertificateForm] = useState(false);
@@ -90,6 +101,11 @@ const StudentDashboard = () => {
         if (userDoc.exists()) {
           const data = userDoc.data() as UserData;
           setUserData(data);
+          
+          // Fetch teacher data if teacher_id exists
+          if (data.teacher_id) {
+            await fetchTeacherData(data.teacher_id);
+          }
         } else {
           console.error("User profile not found");
         }
@@ -101,6 +117,68 @@ const StudentDashboard = () => {
     fetchUserData();
     fetchActivities();
   }, [userId]);
+
+  // Separate function to fetch teacher data
+const fetchTeacherData = async (teacherId: string) => {
+  setTeacherLoading(true);
+  setTeacherError(null);
+  
+  try {
+    // Query the 'teachers' collection instead of 'profiles'
+    const teacherDocRef = doc(db, "teachers", teacherId);
+    const teacherDoc = await getDoc(teacherDocRef);
+    
+    if (teacherDoc.exists()) {
+      const data = teacherDoc.data() as TeacherData;
+      setTeacherData(data);
+    } else {
+      // Handle missing teacher gracefully
+      setTeacherError("Teacher information not available");
+      setTeacherData(null);
+      console.warn(`Teacher profile not found for ID: ${teacherId}`);
+    }
+  } catch (error: any) {
+    // Handle any database errors
+    setTeacherError("Unable to load teacher information");
+    setTeacherData(null);
+    console.error("Error fetching teacher data:", error.message);
+  } finally {
+    setTeacherLoading(false);
+  }
+};
+
+// Also update the main useEffect to handle cases where teacher_id might be invalid
+useEffect(() => {
+  const fetchUserData = async () => {
+    if (!userId) return;
+
+    try {
+      const userDocRef = doc(db, "profiles", userId);
+      const userDoc = await getDoc(userDocRef);
+      
+      if (userDoc.exists()) {
+        const data = userDoc.data() as UserData;
+        setUserData(data);
+        
+        // Only fetch teacher data if teacher_id exists and is valid
+        if (data.teacher_id && data.teacher_id.trim() !== "") {
+          await fetchTeacherData(data.teacher_id);
+        } else {
+          // No teacher assigned
+          setTeacherData(null);
+          setTeacherError("No teacher assigned to your profile");
+        }
+      } else {
+        console.error("User profile not found");
+      }
+    } catch (error: any) {
+      console.error("Error fetching user data:", error.message);
+    }
+  };
+
+  fetchUserData();
+  fetchActivities();
+}, [userId]);
 
   // Separate function to fetch activities
   const fetchActivities = async () => {
@@ -137,7 +215,7 @@ const StudentDashboard = () => {
 
   // Handle certificate data extraction
   const handleDataExtracted = (data: ExtractedData) => {
-    console.log("Data extracted:", data); // Debug log
+    console.log("Data extracted:", data);
     setExtractedData(data);
     setShowCertificateForm(true);
   };
@@ -152,12 +230,12 @@ const StudentDashboard = () => {
     setIsSubmitting(true);
     
     try {
-      console.log("Form data received:", formData); // Debug log
+      console.log("Form data received:", formData);
       
       // First upload the certificate file to storage
       let fileUrl = "";
       if (formData.fileObject) {
-        console.log("Uploading file:", formData.fileObject.name); // Debug log
+        console.log("Uploading file:", formData.fileObject.name);
         
         const fileExt = formData.fileObject.name.split('.').pop();
         const fileName = `${userId}_${Date.now()}.${fileExt}`;
@@ -166,11 +244,11 @@ const StudentDashboard = () => {
         try {
           // Upload file
           const uploadResult = await uploadBytes(storageRef, formData.fileObject);
-          console.log("File uploaded successfully:", uploadResult); // Debug log
+          console.log("File uploaded successfully:", uploadResult);
           
           // Get download URL
           fileUrl = await getDownloadURL(uploadResult.ref);
-          console.log("File URL:", fileUrl); // Debug log
+          console.log("File URL:", fileUrl);
         } catch (uploadError: any) {
           console.error("File upload error:", uploadError);
           throw new Error(`File upload failed: ${uploadError.message}`);
@@ -192,10 +270,10 @@ const StudentDashboard = () => {
         created_at: new Date().toISOString()
       };
       
-      console.log("Creating activity record:", activityData); // Debug log
+      console.log("Creating activity record:", activityData);
       
       const docRef = await addDoc(activitiesRef, activityData);
-      console.log("Activity created with ID:", docRef.id); // Debug log
+      console.log("Activity created with ID:", docRef.id);
       
       // Refresh activities
       await fetchActivities();
@@ -269,7 +347,7 @@ const StudentDashboard = () => {
     <div className="min-h-screen bg-[#FFE6E6]">
       {/* Header */}
       <header className="bg-[#7469B6] text-white py-4">
-        <div className="container mx-auto px-6 bg-[#7469B6]">
+        <div className="container mx-auto px-6">
           <div className="flex justify-between items-center">
             <h1 className="text-2xl font-bold">Student Dashboard</h1>
             <div className="flex gap-4">
@@ -286,9 +364,11 @@ const StudentDashboard = () => {
             </div>
           </div>
         </div>
-        <div>
-          {userData && (
-            <div className="container mx-auto px-6 mt-4 rounded-md bg-[#a69be2]">
+        
+        {/* Student Info */}
+        {userData && (
+          <div className="container mx-auto px-6 mt-4">
+            <div className="bg-[#a69be2] p-4 rounded-md">
               <p className="text-lg">
                 <span className="font-semibold">Name:</span> {userData.student_name}
               </p>
@@ -296,12 +376,58 @@ const StudentDashboard = () => {
                 <span className="font-semibold">Class:</span> {userData.class_name}
               </p>
             </div>
-          )}
-        </div>
+          </div>
+        )}
       </header>
 
       {/* Main Content */}
       <main className="container mx-auto px-6 py-8">
+        {/* Teacher Info Section */}
+        <div className="bg-white rounded-lg shadow-md p-6 mb-8">
+          <div className="flex items-center gap-2 mb-4">
+            <User className="h-6 w-6 text-[#7469B6]" />
+            <h2 className="text-xl font-bold text-[#7469B6]">Your Teacher</h2>
+          </div>
+          
+          {teacherLoading ? (
+            <div className="flex items-center justify-center py-8">
+              <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-[#7469B6]"></div>
+              <span className="ml-2 text-gray-600">Loading teacher information...</span>
+            </div>
+          ) : teacherError ? (
+            <div className="bg-red-50 border border-red-200 rounded-lg p-4">
+              <p className="text-red-600">{teacherError}</p>
+            </div>
+          ) : teacherData ? (
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+              <div className="bg-[#f8f9fa] p-4 rounded-lg">
+                <p className="text-sm font-medium text-gray-500 mb-1">Name</p>
+                <p className="text-lg font-semibold text-gray-800">{teacherData.name}</p>
+              </div>
+              <div className="bg-[#f8f9fa] p-4 rounded-lg">
+                <p className="text-sm font-medium text-gray-500 mb-1">Email</p>
+                <p className="text-lg font-semibold text-gray-800">{teacherData.email}</p>
+              </div>
+              {teacherData.department && (
+                <div className="bg-[#f8f9fa] p-4 rounded-lg">
+                  <p className="text-sm font-medium text-gray-500 mb-1">Department</p>
+                  <p className="text-lg font-semibold text-gray-800">{teacherData.department}</p>
+                </div>
+              )}
+              {teacherData.phone && (
+                <div className="bg-[#f8f9fa] p-4 rounded-lg">
+                  <p className="text-sm font-medium text-gray-500 mb-1">Phone</p>
+                  <p className="text-lg font-semibold text-gray-800">{teacherData.phone}</p>
+                </div>
+              )}
+            </div>
+          ) : (
+            <div className="bg-yellow-50 border border-yellow-200 rounded-lg p-4">
+              <p className="text-yellow-700">No teacher assigned to your profile.</p>
+            </div>
+          )}
+        </div>
+
         {/* Stats Overview */}
         <div className="grid grid-cols-1 md:grid-cols-4 gap-6 mb-8">
           <div className="bg-white p-6 rounded-lg shadow-md">

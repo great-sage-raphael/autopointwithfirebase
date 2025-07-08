@@ -1,5 +1,5 @@
 "use client";
-import React, { useState, useEffect, useCallback } from "react";
+import React, { useState, useEffect } from "react";
 import { Users, CheckCircle, XCircle, Clock, FileText, Edit, Eye, ArrowLeft } from "lucide-react";
 import { 
   collection, 
@@ -10,8 +10,7 @@ import {
   getDoc,
   updateDoc, 
   orderBy,
-  onSnapshot,
-  Unsubscribe
+
 } from "firebase/firestore";
 import { onAuthStateChanged, signOut } from "firebase/auth";
 import { auth, db } from "@/lib/firebase";
@@ -185,7 +184,7 @@ useEffect(() => {
       const profilesRef = collection(db, "profiles");
       const studentQuery = query(
         profilesRef,
-        where("teacher", "==", teacherId),
+        where("teacher_id", "==", teacherId),
         where("role", "==", "student")
       );
       const snapshot = await getDocs(studentQuery);

@@ -10,7 +10,7 @@ import {
   setDoc, 
   getDoc, 
   getDocs, 
-  query 
+  query, 
 } from 'firebase/firestore';
 import { auth, db } from '../../lib/firebase'; // Updated import
 import { UserPlus, LogIn } from 'lucide-react';
@@ -45,27 +45,38 @@ const Auth = () => {
       if (role === 'student' && !isLogin) {
         setTeacherFetchError('');
         try {
+          console.log('Fetching teachers from database...');
           const teachersRef = collection(db, 'teachers');
           const teachersQuery = query(teachersRef);
           const querySnapshot = await getDocs(teachersQuery);
           
+          console.log('Teachers query result:', querySnapshot.size, 'documents found');
 
           const validTeachers: Teacher[] = [];
           querySnapshot.forEach((doc) => {
             const data = doc.data();
+            console.log('Teacher document:', doc.id, data);
+            
             if (data.name && data.email) {
               validTeachers.push({
                 id: doc.id,
                 name: data.name,
                 email: data.email
               });
+            } else {
+              console.warn('Teacher document missing required fields:', doc.id, data);
             }
           });
 
+          console.log('Valid teachers found:', validTeachers.length, validTeachers);
           setAvailableTeachers(validTeachers);
+          
+          if (validTeachers.length === 0) {
+            setTeacherFetchError('No teachers found. Please contact administrator.');
+          }
         } catch (err) {
           console.error('Fetch error:', err);
-          setTeacherFetchError('An unexpected error occurred. Please try again.');
+          setTeacherFetchError('Failed to load teachers. Please try again.');
           setAvailableTeachers([]);
         }
       }
@@ -75,150 +86,170 @@ const Auth = () => {
   }, [role, isLogin]);
 
   const handleAuth = async (e: React.FormEvent) => {
-  e.preventDefault();
-  setIsLoading(true);
-  setMessage('');
+    e.preventDefault();
+    setIsLoading(true);
+    setMessage('');
 
-  // Basic validation
-  if (!email.trim() || !password.trim()) {
-    setMessage('Email and password are required.');
-    setIsLoading(false);
-    return;
-  }
-
-  if (password.length < 6) {
-    setMessage('Password must be at least 6 characters long.');
-    setIsLoading(false);
-    return;
-  }
-
-  // Additional validation for students
-  if (!isLogin && role === 'student') {
-    if (!class_name.trim()) {
-      setMessage('Class name is required for students.');
+    // Basic validation
+    if (!email.trim() || !password.trim()) {
+      setMessage('Email and password are required.');
       setIsLoading(false);
       return;
     }
 
-    if (!teacher_id) {
-      setMessage('Please select a teacher.');
+    if (password.length < 6) {
+      setMessage('Password must be at least 6 characters long.');
       setIsLoading(false);
       return;
     }
-  }
 
-  try {
-    if (isLogin) {
-      // Sign In
-      console.log('Attempting sign in with:', { email: email.trim() });
-      const userCredential = await signInWithEmailAndPassword(auth, email.trim(), password.trim());
-      const user = userCredential.user;
-
-      if (!user) {
-        setMessage('Invalid email or password.');
+    // Additional validation for students
+    if (!isLogin && role === 'student') {
+      if (!student_name.trim()) {
+        setMessage('Name is required.');
         setIsLoading(false);
         return;
       }
 
-      console.log('Sign in successful:', user);
-
-      // Wait a moment for auth state to fully propagate
-      await new Promise(resolve => setTimeout(resolve, 500));
-
-      try {
-        // First check teachers collection
-        const teacherDocRef = doc(db, 'teachers', user.uid);
-        const teacherDoc = await getDoc(teacherDocRef);
-
-        console.log('Teacher check:', { exists: teacherDoc.exists() });
-
-        if (teacherDoc.exists()) {
-          // User is a teacher
-          router.push(`/Dashboard/Teacher/${user.uid}`);
-          return;
-        }
-      } catch (teacherError) {
-        console.log('Teacher check failed (expected if user is not a teacher):', teacherError);
-      }
-
-      try {
-        // If not a teacher, check profiles collection
-        const profileDocRef = doc(db, 'profiles', user.uid);
-        const profileDoc = await getDoc(profileDocRef);
-
-        console.log('Profile check:', { exists: profileDoc.exists() });
-
-        if (!profileDoc.exists()) {
-          setMessage('Error: User profile not found');
-          setIsLoading(false);
-          return;
-        }
-
-        const profileData = profileDoc.data();
-        if (profileData?.role === 'student') {
-          router.push(`/Dashboard/Student/${user.uid}`);
-        } else {
-          setMessage('Error: Invalid user role');
-          setIsLoading(false);
-        }
-      } catch (profileError) {
-        console.error('Profile check failed:', profileError);
-        setMessage('Error accessing user profile. Please try again.');
+      if (!class_name.trim()) {
+        setMessage('Class name is required for students.');
         setIsLoading(false);
+        return;
       }
 
-    } else {
-      // Sign Up
-      console.log('Attempting sign up with:', { email: email.trim(), role });
-      const userCredential = await createUserWithEmailAndPassword(auth, email.trim(), password.trim());
-      const user = userCredential.user;
+      if (!teacher_id) {
+        setMessage('Please select a teacher.');
+        setIsLoading(false);
+        return;
+      }
+    }
 
-      if (user) {
+    // Additional validation for teachers
+    if (!isLogin && role === 'teacher') {
+      if (!student_name.trim()) {
+        setMessage('Name is required.');
+        setIsLoading(false);
+        return;
+      }
+    }
+
+    try {
+      if (isLogin) {
+        // Sign In
+        console.log('Attempting sign in with:', { email: email.trim() });
+        const userCredential = await signInWithEmailAndPassword(auth, email.trim(), password.trim());
+        const user = userCredential.user;
+
+        if (!user) {
+          setMessage('Invalid email or password.');
+          setIsLoading(false);
+          return;
+        }
+
+        console.log('Sign in successful:', user);
+
+        // Wait a moment for auth state to fully propagate
+        await new Promise(resolve => setTimeout(resolve, 500));
+
         try {
-          if (role === 'teacher') {
-            // Insert into teachers collection
-            await setDoc(doc(db, 'teachers', user.uid), {
-              name: student_name.trim(),
-              email: email.trim(),
-              created_at: new Date().toISOString()
-            });
-          } else {
-            // Insert student profile
-            await setDoc(doc(db, 'profiles', user.uid), {
-              id: user.uid,
-              student_name: student_name.trim(),
-              role: 'student',
-              class_name: class_name.trim(),
-              teacher: teacher_id,
-              total_activities: 0,
-              total_points: 0,
-              status: 'active',
-              created_at: new Date().toISOString()
-            });
+          // First check teachers collection
+          const teacherDocRef = doc(db, 'teachers', user.uid);
+          const teacherDoc = await getDoc(teacherDocRef);
+
+          console.log('Teacher check:', { exists: teacherDoc.exists() });
+
+          if (teacherDoc.exists()) {
+            // User is a teacher
+            router.push(`/Dashboard/Teacher/${user.uid}`);
+            return;
+          }
+        } catch (teacherError) {
+          console.log('Teacher check failed (expected if user is not a teacher):', teacherError);
+        }
+
+        try {
+          // If not a teacher, check profiles collection
+          const profileDocRef = doc(db, 'profiles', user.uid);
+          const profileDoc = await getDoc(profileDocRef);
+
+          console.log('Profile check:', { exists: profileDoc.exists() });
+
+          if (!profileDoc.exists()) {
+            setMessage('Error: User profile not found');
+            setIsLoading(false);
+            return;
           }
 
-          setMessage('Account created successfully! Please verify your email and then log in.');
-          setIsLogin(true);
-          resetForm();
-        } catch (error: any) {
-          console.error('Profile creation error:', error);
-          setMessage('Error during registration: ' + error.message);
+          const profileData = profileDoc.data();
+          if (profileData?.role === 'student') {
+            router.push(`/Dashboard/Student/${user.uid}`);
+          } else {
+            setMessage('Error: Invalid user role');
+            setIsLoading(false);
+          }
+        } catch (profileError) {
+          console.error('Profile check failed:', profileError);
+          setMessage('Error accessing user profile. Please try again.');
+          setIsLoading(false);
+        }
+
+      } else {
+        // Sign Up
+        console.log('Attempting sign up with:', { email: email.trim(), role });
+        const userCredential = await createUserWithEmailAndPassword(auth, email.trim(), password.trim());
+        const user = userCredential.user;
+
+        if (user) {
+          try {
+            if (role === 'teacher') {
+              // Insert into teachers collection
+              console.log('Creating teacher profile for:', user.uid);
+              await setDoc(doc(db, 'teachers', user.uid), {
+                name: student_name.trim(),
+                email: email.trim(),
+                role: 'teacher',
+                created_at: new Date().toISOString()
+              });
+              console.log('Teacher profile created successfully');
+            } else {
+              // Insert student profile
+              console.log('Creating student profile for:', user.uid);
+              await setDoc(doc(db, 'profiles', user.uid), {
+                id: user.uid,
+                student_name: student_name.trim(),
+                role: 'student',
+                class_name: class_name.trim(),
+                teacher_id: teacher_id, // Fixed: Use teacher_id instead of teacher
+                total_activities: 0,
+                total_points: 0,
+                status: 'active',
+                created_at: new Date().toISOString()
+              });
+              console.log('Student profile created successfully');
+            }
+
+            setMessage('Account created successfully! Please verify your email and then log in.');
+            setIsLogin(true);
+            resetForm();
+          } catch (error: any) {
+            console.error('Profile creation error:', error);
+            setMessage('Error during registration: ' + error.message);
+          }
         }
       }
+    } catch (error: any) {
+      console.error('Authentication error:', error);
+      if (error.code === 'auth/user-not-found' || error.code === 'auth/wrong-password') {
+        setMessage('Invalid email or password.');
+      } else if (error.code === 'auth/email-already-in-use') {
+        setMessage('This email is already registered. Please log in instead.');
+      } else {
+        setMessage(error.message);
+      }
+    } finally {
+      setIsLoading(false);
     }
-  } catch (error: any) {
-    console.error('Authentication error:', error);
-    if (error.code === 'auth/user-not-found' || error.code === 'auth/wrong-password') {
-      setMessage('Invalid email or password.');
-    } else if (error.code === 'auth/email-already-in-use') {
-      setMessage('This email is already registered. Please log in instead.');
-    } else {
-      setMessage(error.message);
-    }
-  } finally {
-    setIsLoading(false);
-  }
-};
+  };
 
   const resetForm = () => {
     setEmail('');
@@ -234,7 +265,6 @@ const Auth = () => {
     setMessage('');
   };
 
- 
   return (
     <div className="container mx-auto px-4 py-8">
       <div className="max-w-md mx-auto bg-white/90 p-8 rounded-lg shadow-lg">
