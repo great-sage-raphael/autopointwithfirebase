@@ -2,7 +2,14 @@
 import React, { useState, useEffect } from 'react';
 import { FileText } from 'lucide-react';
 import Section from "@/app/components/Section";
-import supabase from '@/lib/supabase';
+import { 
+  collection, 
+  query, 
+  where, 
+  getDocs, 
+  orderBy 
+} from 'firebase/firestore';
+import { db } from '@/lib/firebase'; 
 
 interface Student {
   id: string;
@@ -30,31 +37,40 @@ export default function ActivityReportGenerator() {
         setIsLoading(true);
         setError(null);
         
-        const { data: studentProfiles, error: profilesError } = await supabase
-          .from('profiles')
-          .select('id, role, student_name')
-          .eq('role', 'student');
+        // Create a query to get all profiles where role is 'student'
+        const profilesRef = collection(db, 'profiles');
+        const q = query(
+          profilesRef,
+          where('role', '==', 'student'),
+          orderBy('student_name', 'asc') // Optional: order by name
+        );
         
-        if (profilesError) {
-          console.error('Error fetching student profiles:', profilesError);
-          setError('Failed to load students. Please try again.');
+        const querySnapshot = await getDocs(q);
+        
+        if (querySnapshot.empty) {
+          console.log('No student profiles found');
           return;
         }
         
-        if (!studentProfiles || studentProfiles.length === 0) {
-          return;
-        }
-        
-        const studentData = studentProfiles.map(profile => ({
-          id: profile.id,
-          student_name: profile.student_name,
-          name: profile.student_name
-        }));
+        const studentData: Student[] = [];
+        querySnapshot.forEach((doc) => {
+          const data = doc.data();
+          studentData.push({
+            id: doc.id,
+            student_name: data.student_name,
+            name: data.student_name,
+            email: data.email // Include email if available
+          });
+        });
         
         setStudents(studentData);
       } catch (error) {
-        console.error('Error in fetchStudents:', error);
-        setError('An unexpected error occurred. Please try again.');
+        console.error('Error fetching students:', error);
+        if (error instanceof Error) {
+          setError(`Failed to load students: ${error.message}`);
+        } else {
+          setError('Failed to load students. Please try again.');
+        }
       } finally {
         setIsLoading(false);
       }
@@ -138,7 +154,7 @@ export default function ActivityReportGenerator() {
         window.URL.revokeObjectURL(downloadUrl);
       }, 100);
       
-    } catch (error : any) {
+    } catch (error: any) {
       console.error('Error generating report:', error);
       setError(error.message || 'Failed to generate the report. Please try again.');
     } finally {

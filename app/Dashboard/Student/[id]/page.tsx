@@ -2,11 +2,25 @@
 
 import { useState, useEffect } from "react";
 import { useParams, useRouter } from "next/navigation";
-import supabase from "@/lib/supabase";
-import { Activity, Award, Book, Calendar } from "lucide-react";
+import { signOut } from "firebase/auth";
+import { 
+  doc, 
+  getDoc, 
+  collection, 
+  getDocs, 
+  addDoc, 
+  query, 
+  where 
+} from "firebase/firestore";
+import { 
+  ref, 
+  uploadBytes, 
+  getDownloadURL 
+} from "firebase/storage";
+import { auth, db, storage } from "@/lib/firebase";
+import { Activity, Award, Book, Calendar, ExternalLink, Download } from "lucide-react";
 import { CertificateUploadComponent } from "@/app/components/CertificateUploadComponent";
 import { CertificateForm } from "@/app/components/CertificateForm";
-
 
 // Define interfaces for data types
 interface UserData {
@@ -16,11 +30,15 @@ interface UserData {
 }
 
 interface ActivityData {
-  id: number;
+  id: string;
   activity_name: string;
   date: string;
   points: number;
   status: string;
+  file_url?: string;
+  certificate_type?: string;
+  issuer?: string;
+  description?: string;
 }
 
 // Define interface for extracted data
@@ -30,6 +48,7 @@ interface ExtractedData {
   issuer: string;
   dateOfIssue: string;
   fileObject: File | null;
+  description?: string;
   [key: string]: any;
 }
 
@@ -50,7 +69,7 @@ type CertificateType =
 const StudentDashboard = () => {
   const params = useParams();
   const router = useRouter();
-  const userId = params?.id as string; // Get user ID from URL
+  const userId = params?.id as string;
 
   const [userData, setUserData] = useState<UserData | null>(null);
   const [activities, setActivities] = useState<ActivityData[]>([]);
@@ -58,104 +77,128 @@ const StudentDashboard = () => {
   // Certificate upload state
   const [showCertificateForm, setShowCertificateForm] = useState(false);
   const [extractedData, setExtractedData] = useState<ExtractedData | null>(null);
+  const [isSubmitting, setIsSubmitting] = useState(false);
   
-
   useEffect(() => {
     const fetchUserData = async () => {
       if (!userId) return;
 
-      const { data, error } = await supabase
-        .from("profiles")
-        .select("class_name, role, student_name")
-        .eq("id", userId)
-        .single();
-
-      if (error) {
+      try {
+        const userDocRef = doc(db, "profiles", userId);
+        const userDoc = await getDoc(userDocRef);
+        
+        if (userDoc.exists()) {
+          const data = userDoc.data() as UserData;
+          setUserData(data);
+        } else {
+          console.error("User profile not found");
+        }
+      } catch (error: any) {
         console.error("Error fetching user data:", error.message);
-      } else {
-        setUserData(data);
       }
     };
 
-    const fetchActivities = async () => {
-      const { data, error } = await supabase
-        .from("activities")
-        .select("id, activity_name, date, points, status")
-        .eq("user_id", userId);
-    
-      if (error) {
-        console.error("Error fetching activities:", error.message);
-      } else {
-        setActivities(data);
-      }
-    };
-    
     fetchUserData();
     fetchActivities();
   }, [userId]);
 
+  // Separate function to fetch activities
+  const fetchActivities = async () => {
+    if (!userId) return;
+    
+    try {
+      const activitiesRef = collection(db, "activities");
+      const activitiesQuery = query(activitiesRef, where("user_id", "==", userId));
+      const querySnapshot = await getDocs(activitiesQuery);
+      
+      const activitiesData: ActivityData[] = [];
+      querySnapshot.forEach((doc) => {
+        const data = doc.data();
+        activitiesData.push({
+          id: doc.id,
+          activity_name: data.activity_name,
+          date: data.date,
+          points: data.points,
+          status: data.status,
+          file_url: data.file_url || "",
+          certificate_type: data.certificate_type || "",
+          issuer: data.issuer || "",
+          description: data.description || ""
+        });
+      });
+      
+      // Sort by date (newest first)
+      activitiesData.sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime());
+      setActivities(activitiesData);
+    } catch (error: any) {
+      console.error("Error fetching activities:", error.message);
+    }
+  };
+
   // Handle certificate data extraction
   const handleDataExtracted = (data: ExtractedData) => {
+    console.log("Data extracted:", data); // Debug log
     setExtractedData(data);
     setShowCertificateForm(true);
   };
 
   // Handle form submission
   const handleFormSubmit = async (formData: any) => {
-    if (!userId) return;
+    if (!userId) {
+      alert("User ID not found");
+      return;
+    }
     
+    setIsSubmitting(true);
     
     try {
+      console.log("Form data received:", formData); // Debug log
+      
       // First upload the certificate file to storage
       let fileUrl = "";
       if (formData.fileObject) {
+        console.log("Uploading file:", formData.fileObject.name); // Debug log
+        
         const fileExt = formData.fileObject.name.split('.').pop();
         const fileName = `${userId}_${Date.now()}.${fileExt}`;
-        const filePath = `certificates/${fileName}`;
+        const storageRef = ref(storage, `certificates/${fileName}`);
         
-        const { error: uploadError } = await supabase.storage
-          .from('autopint_files')
-          .upload(filePath, formData.fileObject);
+        try {
+          // Upload file
+          const uploadResult = await uploadBytes(storageRef, formData.fileObject);
+          console.log("File uploaded successfully:", uploadResult); // Debug log
           
-        if (uploadError) {
-          throw new Error(`Error uploading file: ${uploadError.message}`);
+          // Get download URL
+          fileUrl = await getDownloadURL(uploadResult.ref);
+          console.log("File URL:", fileUrl); // Debug log
+        } catch (uploadError: any) {
+          console.error("File upload error:", uploadError);
+          throw new Error(`File upload failed: ${uploadError.message}`);
         }
-        
-        const { data } = supabase.storage
-          .from('autopint_files')
-          .getPublicUrl(filePath);
-          
-        fileUrl = data.publicUrl;
       }
       
-      // Then create activity record
-      const { error } = await supabase.from("activities").insert([
-        {
-          user_id: userId,
-          activity_name: formData.certificateName,
-          certificate_type: formData.certificateType,
-          issuer: formData.issuer,
-          date: formData.dateOfIssue,
-          points: calculatePoints(formData.certificateType as CertificateType),
-          status: "pending",
-          description: formData.description,
-          file_url: fileUrl,
-        },
-      ]);
+      // Create activity record
+      const activitiesRef = collection(db, "activities");
+      const activityData = {
+        user_id: userId,
+        activity_name: formData.certificateName,
+        certificate_type: formData.certificateType,
+        issuer: formData.issuer,
+        date: formData.dateOfIssue,
+        points: calculatePoints(formData.certificateType as CertificateType),
+        status: "pending",
+        description: formData.description || "",
+        file_url: fileUrl,
+        created_at: new Date().toISOString()
+      };
       
-      if (error) {
-        throw new Error(`Error submitting activity: ${error.message}`);
-      }
+      console.log("Creating activity record:", activityData); // Debug log
+      
+      const docRef = await addDoc(activitiesRef, activityData);
+      console.log("Activity created with ID:", docRef.id); // Debug log
       
       // Refresh activities
-      const { data, error: fetchError } = await supabase
-        .from("activities")
-        .select("id, activity_name, date, points, status")
-        .eq("user_id", userId);
-        
-      if (!fetchError) {
-        setActivities(data);
-      }
+      await fetchActivities();
       
       // Reset form state
       setExtractedData(null);
@@ -163,11 +206,17 @@ const StudentDashboard = () => {
       
       alert("Certificate submitted successfully!");
     } catch (error: any) {
-      console.error("Error:", error.message);
+      console.error("Error submitting certificate:", error);
       alert(`Failed to submit certificate: ${error.message}`);
     } finally {
-      
+      setIsSubmitting(false);
     }
+  };
+
+  // Handle cancelling form
+  const handleCancelForm = () => {
+    setExtractedData(null);
+    setShowCertificateForm(false);
   };
   
   // Calculate points based on certificate type
@@ -189,12 +238,29 @@ const StudentDashboard = () => {
     return pointsMap[certificateType] || 5;
   };
 
+  // Function to export data to Excel
+  const exportToExcel = () => {
+    const dataForExcel = activities.map(activity => ({
+      Activity: activity.activity_name,
+      Date: activity.date,
+      Points: activity.points,
+      Status: activity.status,
+      Certificate_Type: activity.certificate_type,
+      Issuer: activity.issuer,
+      Description: activity.description,
+      File_URL: activity.file_url
+    }));
+    
+    console.log("Data for Excel:", dataForExcel);
+    // You can use a library like xlsx or react-excel-export here
+  };
+
   // Handle Logout
   const handleSignOut = async () => {
-    const { error } = await supabase.auth.signOut();
-    if (!error) {
+    try {
+      await signOut(auth);
       router.push("/");
-    } else {
+    } catch (error: any) {
       console.error("Sign out error:", error.message);
     }
   };
@@ -206,9 +272,18 @@ const StudentDashboard = () => {
         <div className="container mx-auto px-6 bg-[#7469B6]">
           <div className="flex justify-between items-center">
             <h1 className="text-2xl font-bold">Student Dashboard</h1>
-            <button onClick={handleSignOut} className="bg-[#AD88C6] px-4 py-2 rounded-lg hover:bg-[#E1AFD1] transition-colors">
-              Sign Out
-            </button>
+            <div className="flex gap-4">
+              <button 
+                onClick={exportToExcel}
+                className="bg-[#AD88C6] px-4 py-2 rounded-lg hover:bg-[#E1AFD1] transition-colors flex items-center gap-2"
+              >
+                <Download className="h-4 w-4" />
+                Export to Excel
+              </button>
+              <button onClick={handleSignOut} className="bg-[#AD88C6] px-4 py-2 rounded-lg hover:bg-[#E1AFD1] transition-colors">
+                Sign Out
+              </button>
+            </div>
           </div>
         </div>
         <div>
@@ -276,6 +351,7 @@ const StudentDashboard = () => {
                   <th className="text-left py-3 px-4 text-gray-800">Date</th>
                   <th className="text-left py-3 px-4 text-gray-800">Points</th>
                   <th className="text-left py-3 px-4 text-gray-800">Status</th>
+                  <th className="text-left py-3 px-4 text-gray-800">Certificate</th>
                 </tr>
               </thead>  
               <tbody>
@@ -287,16 +363,31 @@ const StudentDashboard = () => {
                       <td className="py-3 px-4 text-gray-800">{activity.points}</td>
                       <td className="py-3 px-4 text-gray-800">
                         <span className={`px-2 py-1 rounded-full text-sm ${
-                          activity.status === "Approved" ? "bg-green-100 text-green-800" : "bg-yellow-100 text-yellow-800"
+                          activity.status === "approved" ? "bg-green-100 text-green-800" : "bg-yellow-100 text-yellow-800"
                         }`}>
                           {activity.status}
                         </span>
+                      </td>
+                      <td className="py-3 px-4 text-gray-800">
+                        {activity.file_url ? (
+                          <a 
+                            href={activity.file_url} 
+                            target="_blank" 
+                            rel="noopener noreferrer"
+                            className="text-[#7469B6] hover:text-[#AD88C6] flex items-center gap-1"
+                          >
+                            <ExternalLink className="h-4 w-4" />
+                            View Certificate
+                          </a>
+                        ) : (
+                          <span className="text-gray-400">No file</span>
+                        )}
                       </td>
                     </tr>
                   ))
                 ) : (
                   <tr>
-                    <td colSpan={4} className="py-4 text-center text-gray-800">
+                    <td colSpan={5} className="py-4 text-center text-gray-800">
                       No activities found. Upload your first certificate below!
                     </td>
                   </tr>
@@ -316,19 +407,21 @@ const StudentDashboard = () => {
             <div>
               <CertificateForm 
                 extractedData={extractedData as ExtractedData} 
-                onSubmit={handleFormSubmit} 
+                onSubmit={handleFormSubmit}
               />
-              <button 
-                onClick={() => setShowCertificateForm(false)}
-                className="mt-4 text-[#7469B6] hover:text-[#AD88C6]"
-              >
-                ← Back to upload
-              </button>
+              <div className="flex gap-4 mt-4">
+                <button 
+                  onClick={handleCancelForm}
+                  className="text-[#7469B6] hover:text-[#AD88C6] px-4 py-2 border border-[#7469B6] rounded-lg"
+                  disabled={isSubmitting}
+                >
+                  ← Back to upload
+                </button>
+              </div>
             </div>
           )}
         </div>
       </main>
-            
     </div>
   );
 };

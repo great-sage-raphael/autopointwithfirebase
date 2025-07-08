@@ -1,6 +1,19 @@
 import { NextRequest, NextResponse } from 'next/server';
 import ExcelJS from 'exceljs';
-import supabase from '@/lib/supabase';
+import admin from 'firebase-admin';
+
+// Initialize Firebase Admin SDK (do this once in your app)
+if (!admin.apps.length) {
+  admin.initializeApp({
+    credential: admin.credential.cert({
+      projectId: process.env.FIREBASE_PROJECT_ID,
+      clientEmail: process.env.FIREBASE_CLIENT_EMAIL,
+      privateKey: process.env.FIREBASE_PRIVATE_KEY?.replace(/\\n/g, '\n'),
+    }),
+  });
+}
+
+const db = admin.firestore();
 
 export async function GET(req: NextRequest) {
   try {
@@ -14,64 +27,63 @@ export async function GET(req: NextRequest) {
 
     console.log('Generating Excel report with params:', { studentId, sortBy, fromYear, toYear, sortOrder });
 
-    // Query for approved activities
-    let query = supabase
-      .from('activities')
-      .select(`
-        id,
-        user_id,
-        activity_name,
-        certificate_type,
-        issuer,
-        date,
-        points,
-        status,
-        description,
-        file_url,
-        profiles!activities_user_id_fkey(id, role)
-      `)
-      .eq('status', 'approved');
-
+    // Build query step by step
+    let activitiesQuery = db.collection('activities').where('status', '==', 'approved');
+    
     // Filter by student if studentId is provided
     if (studentId) {
-      query = query.eq('user_id', studentId);
+      activitiesQuery = activitiesQuery.where('user_id', '==', studentId);
     }
 
     // Filter by year range if both fromYear and toYear are provided
     if (fromYear && toYear) {
-      query = query
-        .gte('date', `01-01-${fromYear}`)
-        .lte('date', `12-31-${toYear}`);
+      const fromDate = `01-01-${fromYear}`;
+      const toDate = `12-31-${toYear}`;
+      activitiesQuery = activitiesQuery.where('date', '>=', fromDate).where('date', '<=', toDate);
     }
 
-    // Apply sorting based on the provided parameters
+    // Apply sorting
     const order = ['asc', 'desc'].includes(sortOrder.toLowerCase()) ? sortOrder.toLowerCase() : 'desc';
-    query = query.order(sortBy, { ascending: order === 'asc' });
+    activitiesQuery = activitiesQuery.orderBy(sortBy, order === 'asc' ? 'asc' : 'desc');
 
     // Execute the query to get activities
-    const { data: activities, error } = await query;
+    const activitiesSnapshot = await activitiesQuery.get();
 
-    if (error) {
-      console.error('Error fetching activities:', error);
-      return NextResponse.json({ error: 'Failed to fetch activities' }, { status: 500 });
-    }
+    const activities = activitiesSnapshot.docs.map(doc => ({
+      id: doc.id,
+      ...doc.data()
+    }));
 
-    // Get user information from profiles table
-    const userIds = activities.map((activity) => activity.user_id);
+    // Get unique user IDs
+    const userIds = activities.map((activity: any) => activity.user_id);
     const uniqueUserIds = [...new Set(userIds)];
 
-    const { data: users, error: usersError } = await supabase
-      .from('profiles')
-      .select('id, name, student_name')
-      .in('id', uniqueUserIds.length > 0 ? uniqueUserIds : ['no-users']);
+    // Get user information from profiles collection
+    let users: any[] = [];
+    if (uniqueUserIds.length > 0) {
+      // Firebase has a limit of 10 items for 'in' queries, so we need to batch them
+      const userBatches = [];
+      for (let i = 0; i < uniqueUserIds.length; i += 10) {
+        const batch = uniqueUserIds.slice(i, i + 10);
+        userBatches.push(batch);
+      }
 
-    if (usersError) {
-      console.error('Error fetching user data:', usersError);
+      const userPromises = userBatches.map(batch => {
+        return db.collection('profiles').where(admin.firestore.FieldPath.documentId(), 'in', batch).get();
+      });
+
+      const userSnapshots = await Promise.all(userPromises);
+      users = userSnapshots.flatMap(snapshot => 
+        snapshot.docs.map(doc => ({
+          id: doc.id,
+          ...doc.data()
+        }))
+      );
     }
 
     // Create a user name mapping
     const userNameMap: { [key: string]: string } = {};
-    users?.forEach((user) => {
+    users.forEach((user: any) => {
       userNameMap[user.id] = user.student_name || user.name || user.id;
     });
 
@@ -98,7 +110,7 @@ export async function GET(req: NextRequest) {
       fgColor: { argb: 'FFD3D3D3' }
     };
 
-    activities.forEach((activity) => {
+    activities.forEach((activity: any) => {
       worksheet.addRow({
         studentId: activity.user_id,
         studentName: userNameMap[activity.user_id] || 'Unknown',

@@ -1,7 +1,7 @@
 "use client";
 import React, { useState, useEffect } from "react";
 import { FileUpload } from "./ui/file-upload";
-import supabase from "@/lib/supabase";
+import supabase from "@/lib/firebase";
 
 interface UploadState {
   uploading: boolean;

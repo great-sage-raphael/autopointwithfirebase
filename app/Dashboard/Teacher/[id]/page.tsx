@@ -1,7 +1,20 @@
 "use client";
 import React, { useState, useEffect, useCallback } from "react";
 import { Users, CheckCircle, XCircle, Clock, FileText, Edit, Eye, ArrowLeft } from "lucide-react";
-import supabase from "@/lib/supabase";
+import { 
+  collection, 
+  query, 
+  where, 
+  getDocs, 
+  doc, 
+  getDoc,
+  updateDoc, 
+  orderBy,
+  onSnapshot,
+  Unsubscribe
+} from "firebase/firestore";
+import { onAuthStateChanged, signOut } from "firebase/auth";
+import { auth, db } from "@/lib/firebase";
 import Table from "@/app/components/Table";
 import StatCard from "@/app/components/StatCard";
 import Section from "@/app/components/Section";
@@ -24,7 +37,7 @@ interface Activity {
   date: string;
   points: number;
   status: string;
-  file_url?: string; // Changed from certificate_url to file_url to match DB schema
+  file_url?: string;
 }
 
 interface Stats {
@@ -52,81 +65,70 @@ export default function TeacherDashboard() {
   const [teacherName, setTeacherName] = useState<string>("");
   const [isLoading, setIsLoading] = useState(true);
   const [view, setView] = useState<"dashboard" | "student-details">("dashboard");
-  const fetchTeacherData = useCallback( async () => {
+
+  // Initialize auth state listener
+useEffect(() => {
+  const unsubscribe = onAuthStateChanged(auth, async (user) => {
+    if (!user) {
+      console.error("No user found");
+      router.push('/');
+      return;
+    }
+
     try {
-      setIsLoading(true);
-      const { data: userData, error: userError } = await supabase.auth.getUser();
-      
-      if (userError) {
-        console.error("Error fetching user:", userError);
-        router.push('/');
-        return;
-      }
+      // Get teacher data from Firestore using document ID
+      const teacherRef = doc(db, "teachers", user.uid);
+      const teacherSnapshot = await getDoc(teacherRef);
 
-      if (!userData?.user?.id) {
-        console.error("No user found");
-        router.push('/');
-        return;
-      }
-
-      const { data: teacherData, error: teacherError } = await supabase
-        .from("teachers")
-        .select("id, name")
-        .eq("id", userData.user.id)
-        .single();
-
-      if (teacherError) {
-        console.error("Error fetching teacher data:", teacherError);
-        router.push('/');
-        return;
-      }
-
-      if (!teacherData) {
+      if (!teacherSnapshot.exists()) {
         console.error("No teacher data found");
         router.push('/');
         return;
       }
 
-      setTeacherId(teacherData.id);
-      setTeacherName(teacherData.name);
+      const teacherData = teacherSnapshot.data();
+      setTeacherId(user.uid); // Use the user's UID as teacher ID
+      setTeacherName(teacherData.name || teacherData.teacher_name || "Teacher");
 
-      await Promise.all([
-        fetchStats(teacherData.id),
-        fetchStudents(teacherData.id),
-        fetchPendingActivities(teacherData.id),
-        fetchAllActivities(teacherData.id)
-      ]);
-
+      // Load initial data
+      await loadTeacherData(user.uid);
+      setIsLoading(false);
     } catch (error) {
-      console.error("Unexpected error:", error);
-    } finally {
+      console.error("Error loading teacher data:", error);
       setIsLoading(false);
     }
-  },[router]);
-  useEffect(() => {
-    fetchTeacherData();
-  }, [fetchTeacherData]);
+  });
 
-  
+  return unsubscribe;
+}, [router]);
+
+  const loadTeacherData = async (teacherId: string) => {
+    try {
+      await Promise.all([
+        fetchStats(teacherId),
+        fetchStudents(teacherId),
+        fetchPendingActivities(teacherId),
+        fetchAllActivities(teacherId)
+      ]);
+    } catch (error) {
+      console.error("Error loading teacher data:", error);
+    }
+  };
 
   const fetchStats = async (teacherId: string) => {
     if (!teacherId) return;
 
     try {
-      // First, get all student profiles for this teacher
-      const { data: studentProfiles, error: studentError } = await supabase
-        .from("profiles")
-        .select("id")
-        .eq("teacher", teacherId)
-        .eq("role", "student");
+      // Get all student profiles for this teacher
+      const profilesRef = collection(db, "profiles");
+      const studentQuery = query(
+        profilesRef,
+        where("teacher", "==", teacherId),
+        where("role", "==", "student")
+      );
+      const studentSnapshot = await getDocs(studentQuery);
 
-      if (studentError) {
-        console.error("Error fetching student profiles for stats:", studentError);
-        return;
-      }
-
-      // If no students, set zeroes and return
-      if (!studentProfiles || studentProfiles.length === 0) {
+      if (studentSnapshot.empty) {
         setStats({
           totalStudents: 0,
           pendingReview: 0,
@@ -137,42 +139,39 @@ export default function TeacherDashboard() {
       }
 
       // Extract student IDs
-      const studentIds = studentProfiles.map(profile => profile.id);
+      const studentIds = studentSnapshot.docs.map(doc => doc.data().id);
+      const totalStudents = studentSnapshot.size;
 
-      // Now count activities based on these student IDs
-      const [
-        { count: totalStudents },
-        { count: pendingReview },
-        { count: approved },
-        { count: rejected }
-      ] = await Promise.all([
-        supabase
-          .from("profiles")
-          .select("*", { count: "exact", head: true })
-          .eq("teacher", teacherId)
-          .eq("role", "student"),
-        supabase
-          .from("activities")
-          .select("*", { count: "exact", head: true })
-          .eq("status", "pending")
-          .in("user_id", studentIds),
-        supabase
-          .from("activities")
-          .select("*", { count: "exact", head: true })
-          .eq("status", "approved")
-          .in("user_id", studentIds),
-        supabase
-          .from("activities")
-          .select("*", { count: "exact", head: true })
-          .eq("status", "rejected")
-          .in("user_id", studentIds)
-      ]);
+      // Count activities by status
+      const activitiesRef = collection(db, "activities");
+      
+      // Split into smaller chunks if needed (Firestore 'in' query limit is 10)
+      const chunks = [];
+      for (let i = 0; i < studentIds.length; i += 10) {
+        chunks.push(studentIds.slice(i, i + 10));
+      }
+
+      let pendingCount = 0;
+      let approvedCount = 0;
+      let rejectedCount = 0;
+
+      for (const chunk of chunks) {
+        const [pendingSnapshot, approvedSnapshot, rejectedSnapshot] = await Promise.all([
+          getDocs(query(activitiesRef, where("user_id", "in", chunk), where("status", "==", "pending"))),
+          getDocs(query(activitiesRef, where("user_id", "in", chunk), where("status", "==", "approved"))),
+          getDocs(query(activitiesRef, where("user_id", "in", chunk), where("status", "==", "rejected")))
+        ]);
+
+        pendingCount += pendingSnapshot.size;
+        approvedCount += approvedSnapshot.size;
+        rejectedCount += rejectedSnapshot.size;
+      }
 
       setStats({
-        totalStudents: totalStudents || 0,
-        pendingReview: pendingReview || 0,
-        approved: approved || 0,
-        rejected: rejected || 0,
+        totalStudents,
+        pendingReview: pendingCount,
+        approved: approvedCount,
+        rejected: rejectedCount,
       });
     } catch (error) {
       console.error("Error fetching stats:", error);
@@ -183,14 +182,26 @@ export default function TeacherDashboard() {
     if (!teacherId) return;
 
     try {
-      const { data, error } = await supabase
-        .from("profiles")
-        .select("id, student_name, total_activities, total_points, status")
-        .eq("teacher", teacherId)
-        .eq("role", "student");
+      const profilesRef = collection(db, "profiles");
+      const studentQuery = query(
+        profilesRef,
+        where("teacher", "==", teacherId),
+        where("role", "==", "student")
+      );
+      const snapshot = await getDocs(studentQuery);
+      
+      const studentsData = snapshot.docs.map(doc => {
+        const data = doc.data();
+        return {
+          id: data.id,
+          student_name: data.student_name,
+          total_activities: data.total_activities || 0,
+          total_points: data.total_points || 0,
+          status: data.status || "active"
+        };
+      });
 
-      if (error) throw error;
-      setStudents(data || []);
+      setStudents(studentsData);
     } catch (error) {
       console.error("Error fetching students:", error);
     }
@@ -198,84 +209,67 @@ export default function TeacherDashboard() {
 
   const fetchPendingActivities = async (teacherId: string) => {
     if (!teacherId) return;
-  
+
     try {
-      // First, get all student profiles IDs for this teacher
-      const { data: studentProfiles, error: studentError } = await supabase
-        .from("profiles")
-        .select("id")
-        .eq("teacher", teacherId)
-        .eq("role", "student");
-  
-      if (studentError) {
-        console.error("Error fetching student profiles:", studentError);
-        return;
-      }
-      
-      // If no students found, set empty array and return
-      if (!studentProfiles || studentProfiles.length === 0) {
-        console.log("No students found for this teacher");
+      // First, get all student profiles for this teacher
+      const profilesRef = collection(db, "profiles");
+      const studentQuery = query(
+        profilesRef,
+        where("teacher", "==", teacherId),
+        where("role", "==", "student")
+      );
+      const studentSnapshot = await getDocs(studentQuery);
+
+      if (studentSnapshot.empty) {
         setPendingActivities([]);
         return;
       }
-  
-      // Extract the student IDs into a simple array
-      const studentIds = studentProfiles.map(profile => profile.id);
+
+      // Extract student IDs and create a map of student names
+      const studentIds: string[] = [];
+      const studentNamesMap = new Map<string, string>();
       
-      // Now fetch activities where user_id is in the list of student IDs
-      // and status is pending
-      const { data: activities, error: activitiesError } = await supabase
-        .from("activities")
-        .select("id, user_id, activity_name, date, points, status, file_url")
-        .in("user_id", studentIds)
-        .eq("status", "pending");
-  
-      if (activitiesError) {
-        console.error("Error fetching pending activities:", activitiesError);
-        return;
+      studentSnapshot.docs.forEach(doc => {
+        const data = doc.data();
+        studentIds.push(data.id);
+        studentNamesMap.set(data.id, data.student_name);
+      });
+
+      // Handle chunks for 'in' query limitation
+      const chunks = [];
+      for (let i = 0; i < studentIds.length; i += 10) {
+        chunks.push(studentIds.slice(i, i + 10));
       }
+
+      const allActivities: Activity[] = [];
       
-      // We need to get the student names for these activities
-      if (activities && activities.length > 0) {
-        // Create a map of user_ids to activities for easy lookup
-        const userIdToActivities = new Map();
-        activities.forEach(activity => {
-          userIdToActivities.set(activity.user_id, [
-            ...(userIdToActivities.get(activity.user_id) || []),
-            activity
-          ]);
-        });
-        
-        // Fetch student names
-        const { data: students, error: namesError } = await supabase
-          .from("profiles")
-          .select("id, student_name")
-          .in("id", Array.from(userIdToActivities.keys()));
-          
-        if (namesError) {
-          console.error("Error fetching student names:", namesError);
-          return;
-        }
-        
-        // Now create the final activities with student names included
-        const activitiesWithNames = activities.map(activity => {
-          const student = students?.find(s => s.id === activity.user_id);
+      for (const chunk of chunks) {
+        const activitiesRef = collection(db, "activities");
+        const activitiesQuery = query(
+          activitiesRef,
+          where("user_id", "in", chunk),
+          where("status", "==", "pending")
+        );
+        const activitiesSnapshot = await getDocs(activitiesQuery);
+
+        const activitiesWithNames = activitiesSnapshot.docs.map(doc => {
+          const data = doc.data();
           return {
-            id: activity.id,
-            user_id: activity.user_id,
-            student_name: student?.student_name || "Unknown Student",
-            activity_name: activity.activity_name,
-            date: activity.date,
-            points: activity.points,
-            status: activity.status,
-            file_url: activity.file_url
+            id: doc.id,
+            user_id: data.user_id,
+            student_name: studentNamesMap.get(data.user_id) || "Unknown Student",
+            activity_name: data.activity_name,
+            date: data.date,
+            points: data.points,
+            status: data.status,
+            file_url: data.file_url
           };
         });
-        
-        setPendingActivities(activitiesWithNames);
-      } else {
-        setPendingActivities([]);
+
+        allActivities.push(...activitiesWithNames);
       }
+
+      setPendingActivities(allActivities);
     } catch (error) {
       console.error("Error in fetchPendingActivities:", error);
     }
@@ -283,74 +277,70 @@ export default function TeacherDashboard() {
 
   const fetchAllActivities = async (teacherId: string) => {
     if (!teacherId) return;
-  
+
     try {
-      // First, get all student profiles IDs for this teacher
-      const { data: studentProfiles, error: studentError } = await supabase
-        .from("profiles")
-        .select("id")
-        .eq("teacher", teacherId)
-        .eq("role", "student");
-  
-      if (studentError) {
-        console.error("Error fetching student profiles:", studentError);
-        return;
-      }
-      
-      // If no students found, set empty array and return
-      if (!studentProfiles || studentProfiles.length === 0) {
-        console.log("No students found for this teacher");
+      // Get all student profiles for this teacher
+      const profilesRef = collection(db, "profiles");
+      const studentQuery = query(
+        profilesRef,
+        where("teacher", "==", teacherId),
+        where("role", "==", "student")
+      );
+      const studentSnapshot = await getDocs(studentQuery);
+
+      if (studentSnapshot.empty) {
         setAllActivities([]);
         return;
       }
-  
-      // Extract the student IDs into a simple array
-      const studentIds = studentProfiles.map(profile => profile.id);
+
+      // Extract student IDs and create a map of student names
+      const studentIds: string[] = [];
+      const studentNamesMap = new Map<string, string>();
       
-      // Now fetch all activities where user_id is in the list of student IDs
-      const { data: activities, error: activitiesError } = await supabase
-        .from("activities")
-        .select("id, user_id, activity_name, date, points, status, file_url")
-        .in("user_id", studentIds)
-        .order('date', { ascending: false });
-  
-      if (activitiesError) {
-        console.error("Error fetching all activities:", activitiesError);
-        return;
+      studentSnapshot.docs.forEach(doc => {
+        const data = doc.data();
+        studentIds.push(data.id);
+        studentNamesMap.set(data.id, data.student_name);
+      });
+
+      // Handle chunks for 'in' query limitation
+      const chunks = [];
+      for (let i = 0; i < studentIds.length; i += 10) {
+        chunks.push(studentIds.slice(i, i + 10));
       }
+
+      const allActivities: Activity[] = [];
       
-      // We need to get the student names for these activities
-      if (activities && activities.length > 0) {
-        // Fetch student names
-        const { data: students, error: namesError } = await supabase
-          .from("profiles")
-          .select("id, student_name")
-          .in("id", studentIds);
-          
-        if (namesError) {
-          console.error("Error fetching student names:", namesError);
-          return;
-        }
-        
-        // Now create the final activities with student names included
-        const activitiesWithNames = activities.map(activity => {
-          const student = students?.find(s => s.id === activity.user_id);
+      for (const chunk of chunks) {
+        const activitiesRef = collection(db, "activities");
+        const activitiesQuery = query(
+          activitiesRef,
+          where("user_id", "in", chunk),
+          orderBy("date", "desc")
+        );
+        const activitiesSnapshot = await getDocs(activitiesQuery);
+
+        const activitiesWithNames = activitiesSnapshot.docs.map(doc => {
+          const data = doc.data();
           return {
-            id: activity.id,
-            user_id: activity.user_id,
-            student_name: student?.student_name || "Unknown Student",
-            activity_name: activity.activity_name,
-            date: activity.date,
-            points: activity.points,
-            status: activity.status,
-            file_url: activity.file_url
+            id: doc.id,
+            user_id: data.user_id,
+            student_name: studentNamesMap.get(data.user_id) || "Unknown Student",
+            activity_name: data.activity_name,
+            date: data.date,
+            points: data.points,
+            status: data.status,
+            file_url: data.file_url
           };
         });
-        
-        setAllActivities(activitiesWithNames);
-      } else {
-        setAllActivities([]);
+
+        allActivities.push(...activitiesWithNames);
       }
+
+      // Sort all activities by date
+      allActivities.sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime());
+      
+      setAllActivities(allActivities);
     } catch (error) {
       console.error("Error in fetchAllActivities:", error);
     }
@@ -358,14 +348,27 @@ export default function TeacherDashboard() {
 
   const fetchStudentActivities = async (studentId: string) => {
     try {
-      const { data, error } = await supabase
-        .from("activities")
-        .select("id, activity_name, date, points, status, file_url")
-        .eq("user_id", studentId)
-        .order('date', { ascending: false });
+      const activitiesRef = collection(db, "activities");
+      const activitiesQuery = query(
+        activitiesRef,
+        where("user_id", "==", studentId),
+        orderBy("date", "desc")
+      );
+      const snapshot = await getDocs(activitiesQuery);
 
-      if (error) throw error;
-      setStudentActivities(data || []);
+      const activitiesData = snapshot.docs.map(doc => {
+        const data = doc.data();
+        return {
+          id: doc.id,
+          activity_name: data.activity_name,
+          date: data.date,
+          points: data.points,
+          status: data.status,
+          file_url: data.file_url
+        };
+      });
+
+      setStudentActivities(activitiesData);
     } catch (error) {
       console.error("Error fetching student activities:", error);
       setStudentActivities([]);
@@ -374,23 +377,18 @@ export default function TeacherDashboard() {
 
   const handleApprove = async (activityId: string) => {
     try {
-      const { error } = await supabase
-        .from("activities")
-        .update({ status: "approved" })
-        .eq("id", activityId);
+      const activityRef = doc(db, "activities", activityId);
+      await updateDoc(activityRef, {
+        status: "approved"
+      });
 
-      if (error) throw error;
-      
+      // Refresh data
       if (teacherId) {
-        await Promise.all([
-          fetchStats(teacherId),
-          fetchPendingActivities(teacherId),
-          fetchAllActivities(teacherId)
-        ]);
+        await loadTeacherData(teacherId);
 
         // If we're in student view, refresh that student's activities
         if (selectedStudent) {
-          fetchStudentActivities(selectedStudent.id);
+          await fetchStudentActivities(selectedStudent.id);
         }
       }
     } catch (error) {
@@ -400,23 +398,18 @@ export default function TeacherDashboard() {
 
   const handleReject = async (activityId: string) => {
     try {
-      const { error } = await supabase
-        .from("activities")
-        .update({ status: "rejected" })
-        .eq("id", activityId);
+      const activityRef = doc(db, "activities", activityId);
+      await updateDoc(activityRef, {
+        status: "rejected"
+      });
 
-      if (error) throw error;
-      
+      // Refresh data
       if (teacherId) {
-        await Promise.all([
-          fetchStats(teacherId),
-          fetchPendingActivities(teacherId),
-          fetchAllActivities(teacherId)
-        ]);
+        await loadTeacherData(teacherId);
 
         // If we're in student view, refresh that student's activities
         if (selectedStudent) {
-          fetchStudentActivities(selectedStudent.id);
+          await fetchStudentActivities(selectedStudent.id);
         }
       }
     } catch (error) {
@@ -444,25 +437,21 @@ export default function TeacherDashboard() {
     if (!editingActivity) return;
 
     try {
-      const { error } = await supabase
-        .from("activities")
-        .update({
-          points: editingActivity.points
-        })
-        .eq("id", editingActivity.id);
+      const activityRef = doc(db, "activities", editingActivity.id);
+      await updateDoc(activityRef, {
+        points: editingActivity.points
+      });
 
-      if (error) throw error;
-      
       // Reset editing state
       setEditingActivity(null);
-      
+
       // Refresh data
       if (teacherId) {
-        fetchAllActivities(teacherId);
-        
+        await fetchAllActivities(teacherId);
+
         // If we're in student view, refresh that student's activities
         if (selectedStudent) {
-          fetchStudentActivities(selectedStudent.id);
+          await fetchStudentActivities(selectedStudent.id);
         }
       }
     } catch (error) {
@@ -476,8 +465,7 @@ export default function TeacherDashboard() {
 
   const handleSignOut = async () => {
     try {
-      const { error } = await supabase.auth.signOut();
-      if (error) throw error;
+      await signOut(auth);
       router.push("/");
     } catch (error) {
       console.error("Sign out error:", error);
@@ -486,12 +474,12 @@ export default function TeacherDashboard() {
 
   const renderCertificateLink = (fileUrl: string | undefined) => {
     if (!fileUrl) return "No certificate";
-    
+
     return (
-      <a 
-        href={fileUrl} 
-        target="_blank" 
-        rel="noopener noreferrer" 
+      <a
+        href={fileUrl}
+        target="_blank"
+        rel="noopener noreferrer"
         className="text-blue-600 hover:underline flex items-center gap-1"
       >
         <FileText size={16} />
@@ -568,7 +556,8 @@ export default function TeacherDashboard() {
                 </div>
               )}
             </Section>
-            <div>
+
+            <div className="mb-8">
               <ActivityReportGenerator />
             </div>
 

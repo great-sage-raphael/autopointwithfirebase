@@ -1,6 +1,14 @@
 import { NextApiRequest, NextApiResponse } from 'next';
 import ExcelJS from 'exceljs';
-import supabase from '@/lib/supabase';
+import { db } from '@/lib/firebase';
+import { 
+  collection, 
+  query, 
+  where, 
+  orderBy, 
+  getDocs, 
+  documentId 
+} from 'firebase/firestore';
 
 export default async function handler(req: NextApiRequest, res: NextApiResponse) {
   // Only allow GET requests
@@ -14,27 +22,19 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
     
     console.log('Generating Excel report with params:', { studentId, sortBy, sortOrder });
     
-    // Query for approved activities
-    let query = supabase
-      .from('activities')
-      .select(`
-        id,
-        user_id,
-        activity_name,
-        certificate_type,
-        issuer,
-        date,
-        points,
-        status,
-        description,
-        file_url,
-        profiles!activities_user_id_fkey(id, role)
-      `)
-      .eq('status', 'approved');
+    // Create base query for approved activities
+    let activitiesQuery = query(
+      collection(db, 'activities'),
+      where('status', '==', 'approved')
+    );
     
     // Filter by student if studentId is provided
     if (studentId && typeof studentId === 'string') {
-      query = query.eq('user_id', studentId);
+      activitiesQuery = query(
+        collection(db, 'activities'),
+        where('status', '==', 'approved'),
+        where('user_id', '==', studentId)
+      );
     }
     
     // Apply sorting based on the provided parameters
@@ -44,38 +44,64 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
         ? sortOrder.toLowerCase() 
         : 'desc';
       
-      query = query.order(sortBy, { ascending: order === 'asc' });
+      activitiesQuery = query(
+        activitiesQuery,
+        orderBy(sortBy, order as 'asc' | 'desc')
+      );
     } else {
       // Default sort by date in descending order (newest first)
-      query = query.order('date', { ascending: false });
+      activitiesQuery = query(
+        activitiesQuery,
+        orderBy('date', 'desc')
+      );
     }
     
     // Execute the query to get activities
-    const { data: activities, error } = await query;
+    const activitiesSnapshot = await getDocs(activitiesQuery);
     
-    if (error) {
-      console.error('Error fetching activities:', error);
-      return res.status(500).json({ error: 'Failed to fetch activities' });
-    }
-    
-    if (!activities || activities.length === 0) {
+    if (activitiesSnapshot.empty) {
       console.log('No activities found with the given criteria');
-      // Return an empty Excel file rather than an error
+      // Continue with empty activities array
     }
     
-    // Get all user IDs from activities
-    const userIds = activities ? activities.map(activity => activity.user_id) : [];
+    // Convert Firebase documents to activity objects
+    const activities = activitiesSnapshot.docs.map(doc => ({
+      id: doc.id,
+      ...doc.data()
+    }));
+    
+    // Get all unique user IDs from activities
+    const userIds = activities.length > 0 ? activities.map(activity => activity.id) : [];
     const uniqueUserIds = [...new Set(userIds)];
     
-    // Get user information from profiles table
-    const { data: users, error: usersError } = await supabase
-      .from('profiles') 
-      .select('id, name, student_name') 
-      .in('id', uniqueUserIds.length > 0 ? uniqueUserIds : ['no-users']);
-    
-    if (usersError) {
-      console.error('Error fetching user data:', usersError);
-      // Continue with limited information
+    // Get user information from profiles collection
+    let users: any[] = [];
+    if (uniqueUserIds.length > 0) {
+      // Firebase 'in' queries are limited to 10 items, so we need to batch them
+      const batchSize = 10;
+      const batches = [];
+      
+      for (let i = 0; i < uniqueUserIds.length; i += batchSize) {
+        const batch = uniqueUserIds.slice(i, i + batchSize);
+        const usersQuery = query(
+          collection(db, 'profiles'),
+          where(documentId(), 'in', batch)
+        );
+        batches.push(getDocs(usersQuery));
+      }
+      
+      try {
+        const batchResults = await Promise.all(batches);
+        users = batchResults.flatMap(snapshot => 
+          snapshot.docs.map(doc => ({
+            id: doc.id,
+            ...doc.data()
+          }))
+        );
+      } catch (usersError) {
+        console.error('Error fetching user data:', usersError);
+        // Continue with limited information
+      }
     }
     
     // Create a mapping of user IDs to names
@@ -169,7 +195,7 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
       return res.status(500).json({ error: 'Failed to generate Excel file' });
     }
     
-  } catch (err :any) {
+  } catch (err: any) {
     console.error('Error in generate-excel API route:', err);
     return res.status(500).json({ 
       error: 'Failed to generate Excel report',
