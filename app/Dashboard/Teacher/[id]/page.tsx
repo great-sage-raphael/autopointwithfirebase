@@ -282,7 +282,7 @@ useEffect(() => {
       const profilesRef = collection(db, "profiles");
       const studentQuery = query(
         profilesRef,
-        where("teacher", "==", teacherId),
+        where("teacher_id", "==", teacherId),
         where("role", "==", "student")
       );
       const studentSnapshot = await getDocs(studentQuery);

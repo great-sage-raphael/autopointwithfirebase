@@ -10,7 +10,8 @@ import {
   setDoc, 
   getDoc, 
   getDocs, 
-  query, 
+  query,
+ 
 } from 'firebase/firestore';
 import { auth, db } from '../../lib/firebase'; // Updated import
 import { UserPlus, LogIn } from 'lucide-react';
