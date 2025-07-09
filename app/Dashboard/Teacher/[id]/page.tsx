@@ -1,6 +1,6 @@
 "use client";
 import React, { useState, useEffect } from "react";
-import { Users, CheckCircle, XCircle, Clock, FileText, Edit, Eye, ArrowLeft } from "lucide-react";
+import { Users, CheckCircle, XCircle, Clock, FileText, Edit, Eye, ArrowLeft, RefreshCw } from "lucide-react";
 import { 
   collection, 
   query, 
@@ -10,7 +10,6 @@ import {
   getDoc,
   updateDoc, 
   orderBy,
-
 } from "firebase/firestore";
 import { onAuthStateChanged, signOut } from "firebase/auth";
 import { auth, db } from "@/lib/firebase";
@@ -63,43 +62,47 @@ export default function TeacherDashboard() {
   const [teacherId, setTeacherId] = useState<string | null>(null);
   const [teacherName, setTeacherName] = useState<string>("");
   const [isLoading, setIsLoading] = useState(true);
+  const [isRefreshing, setIsRefreshing] = useState(false);
   const [view, setView] = useState<"dashboard" | "student-details">("dashboard");
 
   // Initialize auth state listener
-useEffect(() => {
-  const unsubscribe = onAuthStateChanged(auth, async (user) => {
-    if (!user) {
-      console.error("No user found");
-      router.push('/');
-      return;
-    }
-
-    try {
-      // Get teacher data from Firestore using document ID
-      const teacherRef = doc(db, "teachers", user.uid);
-      const teacherSnapshot = await getDoc(teacherRef);
-
-      if (!teacherSnapshot.exists()) {
-        console.error("No teacher data found");
+  useEffect(() => {
+    const unsubscribe = onAuthStateChanged(auth, async (user) => {
+      if (!user) {
+        console.error("No user found");
         router.push('/');
         return;
       }
 
-      const teacherData = teacherSnapshot.data();
-      setTeacherId(user.uid); // Use the user's UID as teacher ID
-      setTeacherName(teacherData.name || teacherData.teacher_name || "Teacher");
+      try {
+        // Get teacher data from Firestore using document ID
+        const teacherRef = doc(db, "teachers", user.uid);
+        const teacherSnapshot = await getDoc(teacherRef);
 
-      // Load initial data
-      await loadTeacherData(user.uid);
-      setIsLoading(false);
-    } catch (error) {
-      console.error("Error loading teacher data:", error);
-      setIsLoading(false);
-    }
-  });
+        if (!teacherSnapshot.exists()) {
+          console.error("No teacher data found");
+          router.push('/');
+          return;
+        }
 
-  return unsubscribe;
-}, [router]);
+        const teacherData = teacherSnapshot.data();
+        setTeacherId(user.uid);
+        setTeacherName(teacherData.name || teacherData.teacher_name || "Teacher");
+
+        console.log("Teacher ID set:", user.uid);
+        console.log("Auth user UID:", user.uid);
+
+        // Load initial data
+        await loadTeacherData(user.uid);
+        setIsLoading(false);
+      } catch (error) {
+        console.error("Error loading teacher data:", error);
+        setIsLoading(false);
+      }
+    });
+
+    return unsubscribe;
+  }, [router]);
 
   const loadTeacherData = async (teacherId: string) => {
     try {
@@ -114,10 +117,24 @@ useEffect(() => {
     }
   };
 
+  const refreshAllData = async () => {
+    if (teacherId) {
+      setIsRefreshing(true);
+      await loadTeacherData(teacherId);
+      setIsRefreshing(false);
+    }
+  };
+
+  const handleRefreshData = async () => {
+    await refreshAllData();
+  };
+
   const fetchStats = async (teacherId: string) => {
     if (!teacherId) return;
 
     try {
+      console.log("Fetching stats for teacher:", teacherId);
+      
       // Get all student profiles for this teacher
       const profilesRef = collection(db, "profiles");
       const studentQuery = query(
@@ -125,9 +142,12 @@ useEffect(() => {
         where("teacher_id", "==", teacherId),
         where("role", "==", "student")
       );
+      
       const studentSnapshot = await getDocs(studentQuery);
+      console.log("Student snapshot size:", studentSnapshot.size);
 
       if (studentSnapshot.empty) {
+        console.log("No students found for teacher:", teacherId);
         setStats({
           totalStudents: 0,
           pendingReview: 0,
@@ -137,9 +157,15 @@ useEffect(() => {
         return;
       }
 
-      // Extract student IDs
-      const studentIds = studentSnapshot.docs.map(doc => doc.data().id);
+      // Extract student IDs and log student data
+      const studentIds = studentSnapshot.docs.map(doc => {
+        const data = doc.data();
+        console.log("Student data:", data);
+        return data.id;
+      });
+      
       const totalStudents = studentSnapshot.size;
+      console.log("Total students count:", totalStudents);
 
       // Count activities by status
       const activitiesRef = collection(db, "activities");
@@ -166,12 +192,15 @@ useEffect(() => {
         rejectedCount += rejectedSnapshot.size;
       }
 
-      setStats({
+      const newStats = {
         totalStudents,
         pendingReview: pendingCount,
         approved: approvedCount,
         rejected: rejectedCount,
-      });
+      };
+      
+      console.log("New stats:", newStats);
+      setStats(newStats);
     } catch (error) {
       console.error("Error fetching stats:", error);
     }
@@ -181,6 +210,8 @@ useEffect(() => {
     if (!teacherId) return;
 
     try {
+      console.log("Fetching students for teacher:", teacherId);
+      
       const profilesRef = collection(db, "profiles");
       const studentQuery = query(
         profilesRef,
@@ -189,8 +220,11 @@ useEffect(() => {
       );
       const snapshot = await getDocs(studentQuery);
       
+      console.log("Students snapshot size:", snapshot.size);
+      
       const studentsData = snapshot.docs.map(doc => {
         const data = doc.data();
+        console.log("Student profile data:", data);
         return {
           id: data.id,
           student_name: data.student_name,
@@ -200,6 +234,7 @@ useEffect(() => {
         };
       });
 
+      console.log("Students data processed:", studentsData);
       setStudents(studentsData);
     } catch (error) {
       console.error("Error fetching students:", error);
@@ -505,12 +540,22 @@ useEffect(() => {
               {teacherName ? `Welcome, ${teacherName}` : 'Welcome'}
             </p>
           </div>
-          <button
-            className="bg-[#AD88C6] px-4 py-2 rounded-lg hover:bg-[#E1AFD1] transition-colors"
-            onClick={handleSignOut}
-          >
-            Sign Out
-          </button>
+          <div className="flex items-center space-x-4">
+            <button
+              onClick={handleRefreshData}
+              disabled={isRefreshing}
+              className="bg-[#AD88C6] px-4 py-2 rounded-lg hover:bg-[#E1AFD1] transition-colors flex items-center gap-2 disabled:opacity-50"
+            >
+              <RefreshCw size={16} className={isRefreshing ? "animate-spin" : ""} />
+              {isRefreshing ? "Refreshing..." : "Refresh Data"}
+            </button>
+            <button
+              className="bg-[#AD88C6] px-4 py-2 rounded-lg hover:bg-[#E1AFD1] transition-colors"
+              onClick={handleSignOut}
+            >
+              Sign Out
+            </button>
+          </div>
         </div>
       </header>
 
@@ -551,7 +596,7 @@ useEffect(() => {
                 />
               ) : (
                 <div className="text-center py-8 text-gray-600">
-                  No students found
+                  No students found. Make sure students are properly assigned to your teacher ID: {teacherId}
                 </div>
               )}
             </Section>
